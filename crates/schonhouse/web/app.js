@@ -411,10 +411,42 @@ function renderGroups() {
         showToast(`${group.name}: ${err.message}`);
       }
     };
+    const caps = group.capabilities || [];
+    const power = caps.includes("power");
+    card.querySelector('[data-action="on"]').hidden = !power;
+    card.querySelector('[data-action="off"]').hidden = !power;
     card.querySelector('[data-action="on"]').addEventListener("click", () => apply({ on: true }));
     card.querySelector('[data-action="off"]').addEventListener("click", () => apply({ on: false }));
+
+    // Show only the controls every member supports (intersection computed by the server).
+    let shown = 0;
+    for (const control of card.querySelectorAll(".control")) {
+      control.hidden = !caps.includes(control.dataset.cap);
+      if (!control.hidden) shown++;
+    }
+    card.querySelector(".no-common").hidden = shown > 0 || power;
+
     bindPair(card, "brightness", (v) => apply({ brightness: v }));
     bindPair(card, "color_temp", (v) => apply({ color_temp: v }));
+    const colorCommand = () => ({
+      hue: clamp(card.querySelector('input[type="range"][name="hue"]')),
+      saturation: clamp(card.querySelector('input[type="range"][name="saturation"]')),
+    });
+    bindPair(card, "hue", () => apply(colorCommand()));
+    bindPair(card, "saturation", () => apply(colorCommand()));
+    const hueRange = card.querySelector('input[type="range"][name="hue"]');
+    hueRange.addEventListener("input", () => updateSatTrack(card, hueRange.value));
+    updateSatTrack(card, hueRange.value);
+    for (const chip of card.querySelectorAll(".chips button")) {
+      chip.addEventListener("click", () => apply({ color_temp: Number(chip.dataset.value) }));
+    }
+    const swatches = card.querySelector(".swatches");
+    for (const [label, hue] of SWATCHES) {
+      const b = el("button", { type: "button", title: `${label} (${hue}°)` });
+      b.style.background = hsl(hue);
+      b.addEventListener("click", () => apply({ hue, saturation: 100 }));
+      swatches.appendChild(b);
+    }
     card.querySelector('[data-action="edit"]').addEventListener("click", () => openGroupDialog(group));
     card.querySelector('[data-action="delete"]').addEventListener("click", async () => {
       if (!confirm(`Delete group "${group.name}"?`)) return;

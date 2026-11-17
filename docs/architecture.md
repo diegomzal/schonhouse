@@ -74,7 +74,7 @@ and no frontend build step.
 | `GET` | `/api/devices/{id}/raw` | Live, unfiltered device info JSON from the device |
 | `GET` | `/api/devices/{id}/usage` | Live usage counters (time on, energy) |
 | `POST` | `/api/devices/{id}/reboot` | Reboot the device (`202`) |
-| `GET` | `/api/groups` | List groups |
+| `GET` | `/api/groups` | List groups; each carries `capabilities`, the intersection of its members' |
 | `POST` | `/api/groups` | Create `{ name, devices: [ids] }` (`201`) |
 | `PUT` | `/api/groups/{id}` | Replace name and members |
 | `DELETE` | `/api/groups/{id}` | Delete (`204`) |
@@ -147,8 +147,9 @@ so the config file can be committed. Unknown keys are rejected to catch typos.
 and `/api/log` once, then listens to `/api/events`. Two tabs:
 
 - **Devices**: a scenes bar (apply with one tap, "Save current…" captures the present
-  state, "Manage" to delete), group cards (on/off, brightness, white temperature for all
-  members, edit/delete, "New group…"), "All on/off", and one card per device with a
+  state, "Manage" to delete), group cards (the controls every member supports, from
+  on/off up to color swatches, applied to all members; edit/delete, "New group…"),
+  "All on/off", and one card per device with a
   status dot, power button, and a slider plus a typed number input for each supported
   capability (brightness, white temperature with presets, hue, saturation with color
   swatches). A `Details` panel shows the data reported by the device (model, firmware,

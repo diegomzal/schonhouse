@@ -20,7 +20,8 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::config::{DeviceConfig, DeviceKind, valid_id, valid_name};
 use crate::devices::{
-    ApplyResult, CommandError, DeviceSnapshot, LightCommand, LogEntry, Registry, ServerEvent,
+    ApplyResult, Capability, CommandError, DeviceSnapshot, LightCommand, LogEntry, Registry,
+    ServerEvent,
 };
 use crate::discovery;
 use crate::store::{Group, Scene, SceneEntry, Store};
@@ -437,18 +438,58 @@ fn validate_group(body: &GroupBody) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn list_groups(State(app): State<Arc<AppState>>) -> Result<Json<Vec<Group>>, ApiError> {
-    app.store
-        .list_groups()
-        .await
-        .map(Json)
-        .map_err(ApiError::store)
+/// A stored group plus the capabilities every member shares, so the UI can show the
+/// controls that make sense for the whole group.
+#[derive(Serialize)]
+struct GroupView {
+    #[serde(flatten)]
+    group: Group,
+    capabilities: Vec<Capability>,
+}
+
+/// Intersection of capability lists, in the order of the first list. Empty when there
+/// are no lists.
+fn common_capabilities<'a>(sets: impl IntoIterator<Item = &'a [Capability]>) -> Vec<Capability> {
+    let mut common: Option<Vec<Capability>> = None;
+    for set in sets {
+        common = Some(match common {
+            None => set.to_vec(),
+            Some(current) => current.into_iter().filter(|c| set.contains(c)).collect(),
+        });
+    }
+    common.unwrap_or_default()
+}
+
+/// Members that are not (or no longer) registered are ignored for the intersection.
+fn group_view(group: Group, devices: &[DeviceSnapshot]) -> GroupView {
+    let capabilities = common_capabilities(
+        group
+            .devices
+            .iter()
+            .filter_map(|id| devices.iter().find(|d| &d.id == id))
+            .map(|d| d.capabilities.as_slice()),
+    );
+    GroupView {
+        group,
+        capabilities,
+    }
+}
+
+async fn list_groups(State(app): State<Arc<AppState>>) -> Result<Json<Vec<GroupView>>, ApiError> {
+    let groups = app.store.list_groups().await.map_err(ApiError::store)?;
+    let devices = app.registry.snapshots().await;
+    Ok(Json(
+        groups
+            .into_iter()
+            .map(|g| group_view(g, &devices))
+            .collect(),
+    ))
 }
 
 async fn create_group(
     State(app): State<Arc<AppState>>,
     Json(body): Json<GroupBody>,
-) -> Result<(StatusCode, Json<Group>), ApiError> {
+) -> Result<(StatusCode, Json<GroupView>), ApiError> {
     validate_group(&body)?;
     let group = app
         .store
@@ -460,14 +501,15 @@ async fn create_group(
         .await
         .map_err(ApiError::store)?;
     app.registry.notify_changed("groups");
-    Ok((StatusCode::CREATED, Json(group)))
+    let devices = app.registry.snapshots().await;
+    Ok((StatusCode::CREATED, Json(group_view(group, &devices))))
 }
 
 async fn update_group(
     State(app): State<Arc<AppState>>,
     Path(id): Path<i64>,
     Json(body): Json<GroupBody>,
-) -> Result<Json<Group>, ApiError> {
+) -> Result<Json<GroupView>, ApiError> {
     validate_group(&body)?;
     let group = app
         .store
@@ -479,7 +521,8 @@ async fn update_group(
         .await
         .map_err(ApiError::store)?;
     app.registry.notify_changed("groups");
-    Ok(Json(group))
+    let devices = app.registry.snapshots().await;
+    Ok(Json(group_view(group, &devices)))
 }
 
 async fn delete_group(
@@ -731,6 +774,18 @@ fn serve_asset(path: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capability_intersection() {
+        use Capability::*;
+        let color: &[Capability] = &[Power, Brightness, ColorTemperature, Color];
+        let white: &[Capability] = &[Power, Brightness, ColorTemperature];
+        let plug: &[Capability] = &[Power];
+        assert_eq!(common_capabilities([color, color]), color.to_vec());
+        assert_eq!(common_capabilities([color, white]), white.to_vec());
+        assert_eq!(common_capabilities([white, color, plug]), vec![Power]);
+        assert!(common_capabilities(Vec::<&[Capability]>::new()).is_empty());
+    }
 
     #[test]
     fn slugs() {

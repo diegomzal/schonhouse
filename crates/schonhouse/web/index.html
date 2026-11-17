@@ -213,20 +213,42 @@
           <button type="button" class="ghost" data-action="off">Off</button>
         </div>
       </header>
+      <!-- Same controls as a device; only the ones every member supports are shown. -->
       <div class="controls">
-        <div class="control">
+        <div class="control" data-cap="brightness">
           <label>Brightness</label>
           <input type="range" name="brightness" min="1" max="100" step="1" value="50">
           <input type="number" name="brightness" min="1" max="100" step="1" value="50" inputmode="numeric">
           <span class="unit">%</span>
         </div>
-        <div class="control">
+        <div class="control" data-cap="color-temperature">
           <label>White</label>
           <input type="range" name="color_temp" min="2500" max="6500" step="100" value="2700" class="temp">
           <input type="number" name="color_temp" min="2500" max="6500" step="100" value="2700" inputmode="numeric">
           <span class="unit">K</span>
+          <div class="chips" data-field="color_temp">
+            <button type="button" data-value="2500">Candle</button>
+            <button type="button" data-value="2700">Warm</button>
+            <button type="button" data-value="4000">Neutral</button>
+            <button type="button" data-value="5000">Daylight</button>
+            <button type="button" data-value="6500">Cool</button>
+          </div>
+        </div>
+        <div class="control" data-cap="color">
+          <label>Hue</label>
+          <input type="range" name="hue" min="0" max="360" step="1" value="30" class="hue">
+          <input type="number" name="hue" min="0" max="360" step="1" value="30" inputmode="numeric">
+          <span class="unit">°</span>
+        </div>
+        <div class="control" data-cap="color">
+          <label>Saturation</label>
+          <input type="range" name="saturation" min="1" max="100" step="1" value="100" class="sat">
+          <input type="number" name="saturation" min="1" max="100" step="1" value="100" inputmode="numeric">
+          <span class="unit">%</span>
+          <div class="swatches"></div>
         </div>
       </div>
+      <p class="muted no-common" hidden>These devices have no controls in common.</p>
       <div class="actions">
         <button type="button" class="ghost" data-action="edit">Edit</button>
         <button type="button" class="ghost danger" data-action="delete">Delete</button>
