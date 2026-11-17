@@ -55,11 +55,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/discover", get(discover))
         .route("/api/devices", get(list_devices).post(create_device))
         .route("/api/devices/state", post(set_all_state))
+        .route("/api/devices/toggle", post(toggle_all))
         .route(
             "/api/devices/{id}",
             get(get_device).patch(patch_device).delete(delete_device),
         )
         .route("/api/devices/{id}/state", post(set_device_state))
+        .route("/api/devices/{id}/toggle", post(toggle_device))
         .route("/api/devices/{id}/refresh", post(refresh_device))
         .route("/api/devices/{id}/raw", get(raw_device))
         .route("/api/devices/{id}/usage", get(device_usage))
@@ -67,6 +69,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/groups", get(list_groups).post(create_group))
         .route("/api/groups/{id}", put(update_group).delete(delete_group))
         .route("/api/groups/{id}/state", post(set_group_state))
+        .route("/api/groups/{id}/toggle", post(toggle_group))
         .route("/api/scenes", get(list_scenes).post(create_scene))
         .route("/api/scenes/capture", post(capture_scene))
         .route("/api/scenes/{id}", put(update_scene).delete(delete_scene))
@@ -387,6 +390,47 @@ async fn set_all_state(
     }))
 }
 
+/// The command a wall-switch style toggle sends to a set of devices: off when any of
+/// them is on, otherwise on. Devices without a known state (offline) count as off, so
+/// a set that is entirely unreachable is asked to turn on and reports the failures.
+fn toggle_command<'a>(devices: impl IntoIterator<Item = &'a DeviceSnapshot>) -> LightCommand {
+    let any_on = devices
+        .into_iter()
+        .any(|d| d.state.as_ref().is_some_and(|s| s.on));
+    LightCommand {
+        on: Some(!any_on),
+        ..LightCommand::default()
+    }
+}
+
+/// Turns every device off when any is on, else every device on. Takes no body, so a
+/// physical button only needs to fire one request without knowing the current state.
+async fn toggle_all(State(app): State<Arc<AppState>>) -> Result<Json<BatchResponse>, ApiError> {
+    let devices = app.registry.snapshots().await;
+    let command = toggle_command(&devices);
+    let items = devices
+        .into_iter()
+        .map(|d| (d.id, command.clone()))
+        .collect();
+    Ok(Json(BatchResponse {
+        results: app.registry.apply_many(items).await,
+    }))
+}
+
+/// Flips one device between on and off; returns the new snapshot.
+async fn toggle_device(
+    State(app): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<DeviceSnapshot>, ApiError> {
+    let snapshot = app
+        .registry
+        .snapshot(&id)
+        .await
+        .ok_or(CommandError::NotFound)?;
+    let command = toggle_command([&snapshot]);
+    Ok(Json(app.registry.command(&id, command).await?))
+}
+
 async fn refresh_device(
     State(app): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -549,6 +593,29 @@ async fn set_group_state(
         .await
         .map_err(ApiError::store)?
         .ok_or_else(|| ApiError::not_found("unknown group"))?;
+    let items = group
+        .devices
+        .into_iter()
+        .map(|d| (d, command.clone()))
+        .collect();
+    Ok(Json(BatchResponse {
+        results: app.registry.apply_many(items).await,
+    }))
+}
+
+/// Like `toggle_all`, over the members of a group.
+async fn toggle_group(
+    State(app): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<BatchResponse>, ApiError> {
+    let group = app
+        .store
+        .get_group(id)
+        .await
+        .map_err(ApiError::store)?
+        .ok_or_else(|| ApiError::not_found("unknown group"))?;
+    let devices = app.registry.snapshots().await;
+    let command = toggle_command(devices.iter().filter(|d| group.devices.contains(&d.id)));
     let items = group
         .devices
         .into_iter()
@@ -793,5 +860,55 @@ mod tests {
         assert_eq!(slug("  Desk  Lamp #2 "), "desk-lamp-2");
         assert_eq!(slug("***"), "");
         assert_eq!(slug("Árbol"), "rbol");
+    }
+
+    fn snapshot(id: &str, on: Option<bool>) -> DeviceSnapshot {
+        DeviceSnapshot {
+            id: id.into(),
+            name: id.into(),
+            custom_name: None,
+            kind: DeviceKind::TapoL535,
+            capabilities: Vec::new(),
+            ip: "192.168.0.2".into(),
+            online: on.is_some(),
+            state: on.map(|on| crate::devices::LightState {
+                on,
+                brightness: 50,
+                color_temp: 2700,
+                hue: None,
+                saturation: None,
+            }),
+            info: None,
+            error: None,
+            updated_at: 0,
+            last_seen: None,
+        }
+    }
+
+    #[test]
+    fn toggle_turns_off_when_any_is_on_else_on() {
+        let on = |cmd: LightCommand| cmd.on.expect("toggle always sets on");
+        assert!(!on(toggle_command([
+            &snapshot("a", Some(true)),
+            &snapshot("b", Some(false))
+        ])));
+        assert!(!on(toggle_command([
+            &snapshot("a", Some(true)),
+            &snapshot("b", None)
+        ])));
+        assert!(on(toggle_command([
+            &snapshot("a", Some(false)),
+            &snapshot("b", Some(false))
+        ])));
+        assert!(on(toggle_command([&snapshot("a", None)])));
+        assert!(on(toggle_command(std::iter::empty::<&DeviceSnapshot>())));
+        let cmd = toggle_command([&snapshot("a", Some(true))]);
+        assert_eq!(
+            cmd,
+            LightCommand {
+                on: Some(false),
+                ..LightCommand::default()
+            }
+        );
     }
 }

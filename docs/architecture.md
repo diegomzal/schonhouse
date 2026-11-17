@@ -66,10 +66,12 @@ and no frontend build step.
 | `GET` | `/api/devices` | All device snapshots |
 | `POST` | `/api/devices` | Add a device `{ ip, kind, name?, id? }` (`201`, `409` on duplicate) |
 | `POST` | `/api/devices/state` | Apply a `LightCommand` to every device (batch result) |
+| `POST` | `/api/devices/toggle` | No body. Every device off when any is on, else every device on (batch result) |
 | `GET` | `/api/devices/{id}` | One snapshot (`404` if unknown) |
 | `PATCH` | `/api/devices/{id}` | Set or clear the name override `{ name }` |
 | `DELETE` | `/api/devices/{id}` | Remove the device (`204`); groups and scenes drop it |
 | `POST` | `/api/devices/{id}/state` | Apply a `LightCommand`; returns the new snapshot |
+| `POST` | `/api/devices/{id}/toggle` | No body. Flip the device between on and off; returns the new snapshot |
 | `POST` | `/api/devices/{id}/refresh` | Force a poll; returns the new snapshot |
 | `GET` | `/api/devices/{id}/raw` | Live, unfiltered device info JSON from the device |
 | `GET` | `/api/devices/{id}/usage` | Live usage counters (time on, energy) |
@@ -79,6 +81,7 @@ and no frontend build step.
 | `PUT` | `/api/groups/{id}` | Replace name and members |
 | `DELETE` | `/api/groups/{id}` | Delete (`204`) |
 | `POST` | `/api/groups/{id}/state` | Apply a `LightCommand` to the members (batch result) |
+| `POST` | `/api/groups/{id}/toggle` | No body. Members off when any is on, else all on (batch result) |
 | `GET` | `/api/scenes` | List scenes |
 | `POST` | `/api/scenes` | Create `{ name, entries: [{ device_id, command }] }` (`201`) |
 | `POST` | `/api/scenes/capture` | Save the current state as a scene `{ name, devices? }` |
@@ -86,6 +89,9 @@ and no frontend build step.
 | `DELETE` | `/api/scenes/{id}` | Delete (`204`) |
 | `POST` | `/api/scenes/{id}/apply` | Apply the scene (batch result) |
 | `GET` | `/api/events` | SSE: snapshots on connect, then `device`, `device-removed`, `changed`, `log` |
+
+The toggle endpoints exist for physical buttons: a single request with no body and no
+knowledge of the current state. Offline devices count as off when deciding the direction.
 
 Batch results look like `{ "results": [{ "id", "ok": true, "snapshot" } | { "id",
 "ok": false, "error" }] }` and always answer `200`; per-device failures are inside.
