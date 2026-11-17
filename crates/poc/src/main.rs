@@ -81,7 +81,11 @@ fn load_dotenv(path: &Path) {
 }
 
 fn summarize(ip: &str, info: &serde_json::Value) -> String {
-    let state = if info["device_on"].as_bool().unwrap_or(false) { "ON " } else { "OFF" };
+    let state = if info["device_on"].as_bool().unwrap_or(false) {
+        "ON "
+    } else {
+        "OFF"
+    };
     let mut parts = vec![
         format!("{ip:<14} {state}"),
         format!("nick={:?}", info["nickname"].as_str().unwrap_or("")),
@@ -121,7 +125,10 @@ async fn run_one(client: ApiClient, ip: String, command: Command, json: bool) ->
     let info = serde_json::to_value(device.get_device_info().await?)?;
     let total_ms = started.elapsed().as_millis();
     if json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "ip": ip, "info": info }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "ip": ip, "info": info }))?
+        );
     } else {
         println!("{}", summarize(&ip, &info));
     }
@@ -134,8 +141,12 @@ async fn main() -> Result<()> {
     load_dotenv(Path::new(".env"));
     let cli = Cli::parse();
 
-    let username = std::env::var("TAPO_USERNAME").ok().filter(|s| !s.is_empty());
-    let password = std::env::var("TAPO_PASSWORD").ok().filter(|s| !s.is_empty());
+    let username = std::env::var("TAPO_USERNAME")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let password = std::env::var("TAPO_PASSWORD")
+        .ok()
+        .filter(|s| !s.is_empty());
     let (Some(username), Some(password)) = (username, password) else {
         eprintln!(
             "Missing TAPO_USERNAME / TAPO_PASSWORD. Copy .env.example to .env and fill in your Tapo account credentials."
@@ -158,7 +169,14 @@ async fn main() -> Result<()> {
 
     let tasks: Vec<_> = ips
         .iter()
-        .map(|ip| tokio::spawn(run_one(client.clone(), ip.clone(), cli.command.clone(), cli.json)))
+        .map(|ip| {
+            tokio::spawn(run_one(
+                client.clone(),
+                ip.clone(),
+                cli.command.clone(),
+                cli.json,
+            ))
+        })
         .collect();
 
     let mut failures = 0;

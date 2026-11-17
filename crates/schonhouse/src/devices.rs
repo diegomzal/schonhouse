@@ -1,11 +1,11 @@
 //! Device registry and per-device actors.
 //!
-//! Each configured device runs as an independent Tokio task that owns the connection
-//! to the physical device, polls its state, applies requests sent through a channel,
-//! and reconnects with exponential backoff when the device becomes unreachable.
-//! Changes are published to a shared snapshot map and to a broadcast channel that
-//! feeds the Server-Sent Events stream. A bounded in-memory event log is kept for the
-//! debug view.
+//! Each device runs as an independent Tokio task that owns the connection to the
+//! physical device, polls its state, applies requests sent through a channel, and
+//! reconnects with exponential backoff when the device becomes unreachable. Devices can
+//! be added and removed at runtime. Changes are published to a shared snapshot map and
+//! to a broadcast channel that feeds the Server-Sent Events stream. A bounded in-memory
+//! event log is kept for the debug view.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -15,9 +15,10 @@ use serde::{Deserialize, Serialize};
 use tapo::responses::DeviceInfoColorLightResult;
 use tapo::{ApiClient, ColorLightHandler};
 use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
+use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
-use crate::config::{Config, Credentials, DeviceConfig, DeviceKind};
+use crate::config::{Credentials, DeviceConfig, DeviceKind};
 
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const EVENT_BUFFER: usize = 128;
@@ -58,6 +59,30 @@ pub struct LightState {
     pub saturation: Option<u16>,
 }
 
+impl LightState {
+    /// The command that reproduces this state, used when capturing scenes.
+    pub fn to_command(&self) -> LightCommand {
+        if !self.on {
+            return LightCommand {
+                on: Some(false),
+                ..Default::default()
+            };
+        }
+        let mut command = LightCommand {
+            on: Some(true),
+            brightness: Some(self.brightness),
+            ..Default::default()
+        };
+        if self.color_temp > 0 {
+            command.color_temp = Some(self.color_temp);
+        } else if let (Some(hue), Some(saturation)) = (self.hue, self.saturation) {
+            command.hue = Some(hue);
+            command.saturation = Some(saturation.min(100) as u8);
+        }
+        command
+    }
+}
+
 /// Static and diagnostic information reported by the device itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DeviceInfo {
@@ -85,6 +110,8 @@ pub struct DeviceSnapshot {
     pub id: String,
     /// Configured name, else the device nickname, else the id.
     pub name: String,
+    /// The configured override, if any (so the UI can edit it).
+    pub custom_name: Option<String>,
     pub kind: DeviceKind,
     pub capabilities: Vec<Capability>,
     pub ip: String,
@@ -99,7 +126,7 @@ pub struct DeviceSnapshot {
 }
 
 /// Partial update sent by API clients. Fields that are `None` are left untouched.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LightCommand {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -169,7 +196,10 @@ pub struct LogEntry {
 /// Everything that goes out on the SSE stream.
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
-    Device(DeviceSnapshot),
+    Device(Box<DeviceSnapshot>),
+    DeviceRemoved(String),
+    /// A stored collection ("groups" or "scenes") changed; clients should reload it.
+    Changed(&'static str),
     Log(LogEntry),
 }
 
@@ -181,14 +211,50 @@ pub enum CommandError {
     Unavailable,
 }
 
+impl CommandError {
+    pub fn message(&self) -> String {
+        match self {
+            CommandError::NotFound => "unknown device".into(),
+            CommandError::Invalid(m) | CommandError::Device(m) => m.clone(),
+            CommandError::Unavailable => "device worker is not running".into(),
+        }
+    }
+}
+
+/// Outcome of applying a command to one device as part of a batch.
+#[derive(Debug, Clone, Serialize)]
+pub struct ApplyResult {
+    pub id: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<DeviceSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 type Reply<T> = oneshot::Sender<Result<T, String>>;
 
 enum Request {
-    Command { command: LightCommand, reply: Reply<DeviceSnapshot> },
-    Refresh { reply: Reply<DeviceSnapshot> },
-    Raw { reply: Reply<serde_json::Value> },
-    Usage { reply: Reply<serde_json::Value> },
-    Reboot { reply: Reply<()> },
+    Command {
+        command: LightCommand,
+        reply: Reply<DeviceSnapshot>,
+    },
+    Refresh {
+        reply: Reply<DeviceSnapshot>,
+    },
+    Raw {
+        reply: Reply<serde_json::Value>,
+    },
+    Usage {
+        reply: Reply<serde_json::Value>,
+    },
+    Reboot {
+        reply: Reply<()>,
+    },
+    SetName {
+        name: Option<String>,
+        reply: Reply<DeviceSnapshot>,
+    },
 }
 
 impl Request {
@@ -199,6 +265,7 @@ impl Request {
             Request::Raw { reply } => drop(reply.send(Err(message))),
             Request::Usage { reply } => drop(reply.send(Err(message))),
             Request::Reboot { reply } => drop(reply.send(Err(message))),
+            Request::SetName { reply, .. } => drop(reply.send(Err(message))),
         }
     }
 }
@@ -213,12 +280,15 @@ struct Publisher {
 
 impl Publisher {
     async fn publish(&self, snapshot: DeviceSnapshot) {
-        self.snapshots
-            .write()
-            .await
-            .insert(snapshot.id.clone(), snapshot.clone());
+        let mut map = self.snapshots.write().await;
+        // A removed device may still have an actor winding down: drop its updates.
+        if !map.contains_key(&snapshot.id) {
+            return;
+        }
+        map.insert(snapshot.id.clone(), snapshot.clone());
+        drop(map);
         // Nobody listening is not an error.
-        let _ = self.events.send(ServerEvent::Device(snapshot));
+        let _ = self.events.send(ServerEvent::Device(Box::new(snapshot)));
     }
 
     fn log(&self, level: LogLevel, device: Option<&str>, message: impl Into<String>) {
@@ -241,49 +311,116 @@ impl Publisher {
 
 pub struct Registry {
     publisher: Publisher,
-    senders: BTreeMap<String, mpsc::Sender<Request>>,
+    senders: RwLock<BTreeMap<String, mpsc::Sender<Request>>>,
+    client: ApiClient,
+    poll: Duration,
 }
 
 impl Registry {
-    /// Spawns one actor per configured device and returns the shared registry.
-    pub async fn start(config: &Config, credentials: &Credentials, poll: Duration) -> Arc<Self> {
+    pub fn new(credentials: &Credentials, poll: Duration) -> Arc<Self> {
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let publisher = Publisher {
             snapshots: Arc::new(RwLock::new(BTreeMap::new())),
             log: Arc::new(Mutex::new(VecDeque::with_capacity(LOG_CAPACITY))),
             events,
         };
-        let client = ApiClient::new(
-            credentials.username.clone(),
-            credentials.password.clone(),
-        )
-        .with_timeout(Duration::from_secs(10));
+        let client = ApiClient::new(credentials.username.clone(), credentials.password.clone())
+            .with_timeout(Duration::from_secs(10));
+        Arc::new(Self {
+            publisher,
+            senders: RwLock::new(BTreeMap::new()),
+            client,
+            poll,
+        })
+    }
 
-        let mut senders = BTreeMap::new();
-        for device in &config.devices {
-            let (tx, rx) = mpsc::channel(16);
-            senders.insert(device.id.clone(), tx);
-            let tracked = Tracked::new(device.clone());
-            publisher
-                .snapshots
-                .write()
-                .await
-                .insert(device.id.clone(), tracked.snapshot(false, None));
-            match device.kind {
-                DeviceKind::TapoL535 => {
-                    tokio::spawn(run_light(tracked, client.clone(), poll, rx, publisher.clone()));
-                }
+    /// Starts an actor for the device. Fails if the id is already registered.
+    pub async fn add(&self, device: DeviceConfig) -> Result<DeviceSnapshot, CommandError> {
+        device
+            .validate()
+            .map_err(|e| CommandError::Invalid(e.to_string()))?;
+        let mut senders = self.senders.write().await;
+        if senders.contains_key(&device.id) {
+            return Err(CommandError::Invalid(format!(
+                "device {:?} already exists",
+                device.id
+            )));
+        }
+        let (tx, rx) = mpsc::channel(16);
+        senders.insert(device.id.clone(), tx);
+        let tracked = Tracked::new(device.clone());
+        let snapshot = tracked.snapshot(false, None);
+        self.publisher
+            .snapshots
+            .write()
+            .await
+            .insert(device.id.clone(), snapshot.clone());
+        drop(senders);
+        match device.kind {
+            DeviceKind::TapoL535 => {
+                tokio::spawn(run_light(
+                    tracked,
+                    self.client.clone(),
+                    self.poll,
+                    rx,
+                    self.publisher.clone(),
+                ));
             }
         }
-        Arc::new(Self { publisher, senders })
+        let _ = self
+            .publisher
+            .events
+            .send(ServerEvent::Device(Box::new(snapshot.clone())));
+        self.publisher.log(
+            LogLevel::Info,
+            Some(&device.id),
+            format!("added ({})", device.ip),
+        );
+        Ok(snapshot)
+    }
+
+    /// Stops the actor and forgets the device. Returns `false` if it was unknown.
+    pub async fn remove(&self, id: &str) -> bool {
+        let removed = self.senders.write().await.remove(id).is_some();
+        if removed {
+            self.publisher.snapshots.write().await.remove(id);
+            let _ = self
+                .publisher
+                .events
+                .send(ServerEvent::DeviceRemoved(id.to_string()));
+            self.publisher.log(LogLevel::Info, Some(id), "removed");
+        }
+        removed
+    }
+
+    pub async fn rename(
+        &self,
+        id: &str,
+        name: Option<String>,
+    ) -> Result<DeviceSnapshot, CommandError> {
+        self.ask(id, |reply| Request::SetName { name, reply }).await
+    }
+
+    pub fn notify_changed(&self, what: &'static str) {
+        let _ = self.publisher.events.send(ServerEvent::Changed(what));
     }
 
     pub async fn snapshots(&self) -> Vec<DeviceSnapshot> {
-        self.publisher.snapshots.read().await.values().cloned().collect()
+        self.publisher
+            .snapshots
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub async fn snapshot(&self, id: &str) -> Option<DeviceSnapshot> {
         self.publisher.snapshots.read().await.get(id).cloned()
+    }
+
+    pub async fn contains(&self, id: &str) -> bool {
+        self.senders.read().await.contains_key(id)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
@@ -310,7 +447,48 @@ impl Registry {
         command: LightCommand,
     ) -> Result<DeviceSnapshot, CommandError> {
         command.validate().map_err(CommandError::Invalid)?;
-        self.ask(id, |reply| Request::Command { command, reply }).await
+        self.ask(id, |reply| Request::Command { command, reply })
+            .await
+    }
+
+    /// Applies one command per device concurrently and reports every outcome in the
+    /// order given.
+    pub async fn apply_many(
+        self: &Arc<Self>,
+        items: Vec<(String, LightCommand)>,
+    ) -> Vec<ApplyResult> {
+        let mut set = JoinSet::new();
+        for (index, (id, command)) in items.into_iter().enumerate() {
+            let registry = Arc::clone(self);
+            set.spawn(async move {
+                let result = registry.command(&id, command).await;
+                (index, id, result)
+            });
+        }
+        let mut results: Vec<Option<ApplyResult>> = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            let Ok((index, id, result)) = joined else {
+                continue;
+            };
+            if results.len() <= index {
+                results.resize_with(index + 1, || None);
+            }
+            results[index] = Some(match result {
+                Ok(snapshot) => ApplyResult {
+                    id,
+                    ok: true,
+                    snapshot: Some(snapshot),
+                    error: None,
+                },
+                Err(err) => ApplyResult {
+                    id,
+                    ok: false,
+                    snapshot: None,
+                    error: Some(err.message()),
+                },
+            });
+        }
+        results.into_iter().flatten().collect()
     }
 
     pub async fn refresh(&self, id: &str) -> Result<DeviceSnapshot, CommandError> {
@@ -335,7 +513,13 @@ impl Registry {
         id: &str,
         make: impl FnOnce(Reply<T>) -> Request,
     ) -> Result<T, CommandError> {
-        let sender = self.senders.get(id).ok_or(CommandError::NotFound)?;
+        let sender = self
+            .senders
+            .read()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or(CommandError::NotFound)?;
         let (reply, rx) = oneshot::channel();
         sender
             .send(make(reply))
@@ -351,7 +535,7 @@ impl Registry {
 
 /// First sentence of a device error, capped, for the event log. Vendor errors can be
 /// paragraphs long; the full text stays in the snapshot's `error` field.
-fn short(message: &str) -> String {
+pub fn short(message: &str) -> String {
     let first = message
         .split_once(". ")
         .map(|(first, _)| format!("{first}."))
@@ -408,6 +592,7 @@ impl Tracked {
         DeviceSnapshot {
             id: self.device.id.clone(),
             name,
+            custom_name: self.device.name.clone(),
             kind: self.device.kind,
             capabilities: self.device.kind.capabilities().to_vec(),
             ip: self.device.ip.clone(),
@@ -483,11 +668,30 @@ async fn broken(
 ) -> String {
     let message = err.to_string();
     warn!(device = %tracked.id(), "{what}: {message}");
-    publisher.log(level, Some(tracked.id()), format!("{what}: {}", short(&message)));
+    publisher.log(
+        level,
+        Some(tracked.id()),
+        format!("{what}: {}", short(&message)),
+    );
     publisher
         .publish(tracked.snapshot(false, Some(message.clone())))
         .await;
     message
+}
+
+/// Renames work whether the device is online or not.
+async fn set_name(
+    tracked: &mut Tracked,
+    publisher: &Publisher,
+    online: bool,
+    error: Option<String>,
+    name: Option<String>,
+    reply: Reply<DeviceSnapshot>,
+) {
+    tracked.device.name = name;
+    let snapshot = tracked.snapshot(online, error);
+    publisher.publish(snapshot.clone()).await;
+    let _ = reply.send(Ok(snapshot));
 }
 
 /// Serves one request while connected. `Err(())` means the session is broken and the
@@ -510,7 +714,11 @@ async fn handle_request(
                     let snapshot = tracked.snapshot(true, None);
                     let described = serde_json::to_string(&command).unwrap_or_default();
                     debug!(device = %tracked.id(), "applied {described}");
-                    publisher.log(LogLevel::Info, Some(tracked.id()), format!("applied {described}"));
+                    publisher.log(
+                        LogLevel::Info,
+                        Some(tracked.id()),
+                        format!("applied {described}"),
+                    );
                     publisher.publish(snapshot.clone()).await;
                     let _ = reply.send(Ok(snapshot));
                     Ok(())
@@ -559,8 +767,14 @@ async fn handle_request(
                 Ok(())
             }
             Err(err) => {
-                let message =
-                    broken(publisher, tracked, LogLevel::Error, "usage read failed", &err).await;
+                let message = broken(
+                    publisher,
+                    tracked,
+                    LogLevel::Error,
+                    "usage read failed",
+                    &err,
+                )
+                .await;
                 let _ = reply.send(Err(message));
                 Err(())
             }
@@ -584,6 +798,10 @@ async fn handle_request(
                 Err(())
             }
         },
+        Request::SetName { name, reply } => {
+            set_name(tracked, publisher, true, None, name, reply).await;
+            Ok(())
+        }
     }
 }
 
@@ -635,6 +853,9 @@ async fn run_light(
                         _ = &mut sleep => break,
                         request = requests.recv() => match request {
                             None => return,
+                            Some(Request::SetName { name, reply }) => {
+                                set_name(&mut tracked, &publisher, false, Some(message.clone()), name, reply).await;
+                            }
                             Some(request) => request.reject(format!("device offline: {message}")),
                         },
                     }
@@ -669,5 +890,136 @@ async fn run_light(
             }
         }
         // Fall through to reconnect.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_validation() {
+        assert!(LightCommand::default().validate().is_err());
+        assert!(
+            LightCommand {
+                on: Some(true),
+                ..Default::default()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            LightCommand {
+                brightness: Some(0),
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            LightCommand {
+                brightness: Some(100),
+                ..Default::default()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            LightCommand {
+                color_temp: Some(2400),
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            LightCommand {
+                hue: Some(10),
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            LightCommand {
+                hue: Some(361),
+                saturation: Some(50),
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            LightCommand {
+                hue: Some(360),
+                saturation: Some(1),
+                ..Default::default()
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn command_json_rejects_unknown_fields() {
+        assert!(serde_json::from_str::<LightCommand>(r#"{"on":true,"colour":1}"#).is_err());
+        let c: LightCommand = serde_json::from_str(r#"{"brightness":40}"#).unwrap();
+        assert_eq!(c.brightness, Some(40));
+        assert_eq!(serde_json::to_string(&c).unwrap(), r#"{"brightness":40}"#);
+    }
+
+    #[test]
+    fn state_to_command() {
+        let off = LightState {
+            on: false,
+            brightness: 50,
+            color_temp: 0,
+            hue: Some(1),
+            saturation: Some(1),
+        };
+        assert_eq!(
+            off.to_command(),
+            LightCommand {
+                on: Some(false),
+                ..Default::default()
+            }
+        );
+
+        let white = LightState {
+            on: true,
+            brightness: 60,
+            color_temp: 2700,
+            hue: None,
+            saturation: None,
+        };
+        let c = white.to_command();
+        assert_eq!(
+            (c.on, c.brightness, c.color_temp, c.hue),
+            (Some(true), Some(60), Some(2700), None)
+        );
+
+        let color = LightState {
+            on: true,
+            brightness: 30,
+            color_temp: 0,
+            hue: Some(120),
+            saturation: Some(100),
+        };
+        let c = color.to_command();
+        assert_eq!(
+            (c.color_temp, c.hue, c.saturation),
+            (None, Some(120), Some(100))
+        );
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn short_keeps_first_sentence() {
+        assert_eq!(
+            short("Unauthorized: X. Long explanation. More."),
+            "Unauthorized: X."
+        );
+        assert_eq!(short("no period here"), "no period here");
+        assert!(short(&"a".repeat(500)).chars().count() <= 201);
     }
 }

@@ -21,8 +21,40 @@
   </header>
 
   <section id="tab-devices" class="tab active">
-    <main id="devices" class="grid"></main>
-    <p id="empty" class="muted" hidden>No devices configured. Add some to <code>schonhouse.toml</code>.</p>
+    <section class="strip">
+      <div class="strip-head">
+        <h2>Scenes</h2>
+        <div class="strip-actions">
+          <button type="button" class="ghost" id="save-scene">Save current…</button>
+          <button type="button" class="ghost" id="manage-scenes" aria-pressed="false">Manage</button>
+        </div>
+      </div>
+      <div id="scenes" class="chips big"></div>
+      <p id="scenes-empty" class="muted" hidden>No scenes yet. Set the lights the way you like and press “Save current…”.</p>
+    </section>
+
+    <section class="strip">
+      <div class="strip-head">
+        <h2>Groups</h2>
+        <div class="strip-actions">
+          <button type="button" class="ghost" id="all-on">All on</button>
+          <button type="button" class="ghost" id="all-off">All off</button>
+          <button type="button" class="ghost" id="new-group">New group…</button>
+        </div>
+      </div>
+      <div id="groups" class="grid"></div>
+    </section>
+
+    <section class="strip">
+      <div class="strip-head">
+        <h2>Devices</h2>
+        <div class="strip-actions">
+          <button type="button" class="ghost" id="add-device">Add device…</button>
+        </div>
+      </div>
+      <main id="devices" class="grid"></main>
+      <p id="empty" class="muted" hidden>No devices yet. Use “Add device…” to discover the ones on your network.</p>
+    </section>
   </section>
 
   <section id="tab-system" class="tab">
@@ -47,6 +79,50 @@
   </section>
 
   <div id="toast" class="toast" hidden></div>
+
+  <!-- Add device: discovery + manual form -->
+  <dialog id="dlg-device">
+    <form method="dialog" class="dialog">
+      <header><h2>Add device</h2><button type="button" class="close" data-close aria-label="Close">×</button></header>
+      <section>
+        <div class="row-between">
+          <h3>Found on the network</h3>
+          <button type="button" class="ghost" id="discover">Scan</button>
+        </div>
+        <p id="discover-status" class="muted">Press Scan to look for Tapo devices (takes about 5 seconds).</p>
+        <ul id="discovered" class="found"></ul>
+      </section>
+      <section>
+        <h3>Manual</h3>
+        <label class="field">IP address <input name="ip" required placeholder="192.168.0.10" inputmode="decimal" autocomplete="off"></label>
+        <label class="field">Kind
+          <select name="kind"><option value="tapo-l535">Tapo L535 (color bulb)</option></select>
+        </label>
+        <label class="field">Name <span class="muted">(optional, defaults to the name in the Tapo app)</span> <input name="name" maxlength="64" autocomplete="off"></label>
+        <label class="field">Id <span class="muted">(optional, used in URLs)</span> <input name="id" maxlength="64" pattern="[A-Za-z0-9_-]+" autocomplete="off"></label>
+      </section>
+      <footer>
+        <button type="button" class="ghost" data-close>Cancel</button>
+        <button type="submit" class="primary">Add</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- Create or edit a group -->
+  <dialog id="dlg-group">
+    <form method="dialog" class="dialog">
+      <header><h2 id="dlg-group-title">New group</h2><button type="button" class="close" data-close aria-label="Close">×</button></header>
+      <section>
+        <label class="field">Name <input name="name" required maxlength="64" autocomplete="off"></label>
+        <h3>Members</h3>
+        <div id="group-members" class="checklist"></div>
+      </section>
+      <footer>
+        <button type="button" class="ghost" data-close>Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </footer>
+    </form>
+  </dialog>
 
   <template id="card">
     <article class="card device">
@@ -107,14 +183,54 @@
       <details class="details">
         <summary>Details</summary>
         <dl class="facts"></dl>
+        <div class="rename">
+          <input class="rename-input" maxlength="64" placeholder="Custom name (empty = device name)" autocomplete="off">
+          <button type="button" class="ghost" data-action="rename">Save name</button>
+        </div>
         <div class="actions">
           <button type="button" class="ghost" data-action="refresh">Refresh</button>
           <button type="button" class="ghost" data-action="usage">Usage</button>
           <button type="button" class="ghost" data-action="raw">Raw JSON</button>
           <button type="button" class="ghost danger" data-action="reboot">Reboot</button>
+          <button type="button" class="ghost danger" data-action="remove">Remove</button>
         </div>
         <pre class="output" hidden></pre>
       </details>
+    </article>
+  </template>
+
+  <template id="group-card">
+    <article class="card group">
+      <header>
+        <div class="title">
+          <div>
+            <h2 class="name"></h2>
+            <div class="meta muted members"></div>
+          </div>
+        </div>
+        <div class="row">
+          <button type="button" class="ghost" data-action="on">On</button>
+          <button type="button" class="ghost" data-action="off">Off</button>
+        </div>
+      </header>
+      <div class="controls">
+        <div class="control">
+          <label>Brightness</label>
+          <input type="range" name="brightness" min="1" max="100" step="1" value="50">
+          <input type="number" name="brightness" min="1" max="100" step="1" value="50" inputmode="numeric">
+          <span class="unit">%</span>
+        </div>
+        <div class="control">
+          <label>White</label>
+          <input type="range" name="color_temp" min="2500" max="6500" step="100" value="2700" class="temp">
+          <input type="number" name="color_temp" min="2500" max="6500" step="100" value="2700" inputmode="numeric">
+          <span class="unit">K</span>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="button" class="ghost" data-action="edit">Edit</button>
+        <button type="button" class="ghost danger" data-action="delete">Delete</button>
+      </div>
     </article>
   </template>
 

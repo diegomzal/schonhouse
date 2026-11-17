@@ -8,3 +8,9 @@ __pycache__/
 
 # Rust (production service)
 target/
+
+# SQLite database (runtime data)
+*.db
+*.db-wal
+*.db-shm
+

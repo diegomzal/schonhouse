@@ -1,0 +1,46 @@
+# systemd unit for Schonhouse. Install with:
+#   sudo useradd --system --home /var/lib/schonhouse --create-home --shell /usr/sbin/nologin schonhouse
+#   sudo install -m 755 target/release/schonhouse /usr/local/bin/schonhouse
+#   sudo install -m 644 schonhouse.toml /etc/schonhouse/schonhouse.toml
+#   sudo install -m 600 -o schonhouse .env /etc/schonhouse/env     # TAPO_USERNAME / TAPO_PASSWORD
+#   sudo install -m 644 deploy/schonhouse.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now schonhouse
+
+[Unit]
+Description=Schonhouse home assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=schonhouse
+Group=schonhouse
+WorkingDirectory=/var/lib/schonhouse
+EnvironmentFile=/etc/schonhouse/env
+Environment=SCHONHOUSE_CONFIG=/etc/schonhouse/schonhouse.toml
+Environment=RUST_LOG=info
+ExecStart=/usr/local/bin/schonhouse
+Restart=on-failure
+RestartSec=3
+
+# Hardening: the service only needs the network and its own data directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/schonhouse
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
