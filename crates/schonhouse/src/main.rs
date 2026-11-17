@@ -9,6 +9,7 @@ mod config;
 mod devices;
 mod discovery;
 mod store;
+mod usage;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -75,6 +76,14 @@ async fn main() -> Result<()> {
         format!("server {} started", env!("CARGO_PKG_VERSION")),
     );
 
+    if config.server.usage_sample_interval_mins > 0 {
+        usage::spawn(
+            Arc::clone(&registry),
+            store.clone(),
+            Duration::from_secs(config.server.usage_sample_interval_mins * 60),
+        );
+    }
+
     let state = Arc::new(api::AppState {
         registry,
         store,
@@ -87,6 +96,7 @@ async fn main() -> Result<()> {
         bind: config.server.bind.to_string(),
         poll_interval_secs: config.server.poll_interval_secs,
         discovery_broadcast: config.server.discovery_broadcast.clone(),
+        usage_sample_interval_mins: config.server.usage_sample_interval_mins,
     });
     let app = api::router(state);
 

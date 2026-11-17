@@ -24,7 +24,8 @@ use crate::devices::{
     ServerEvent,
 };
 use crate::discovery;
-use crate::store::{Group, Scene, SceneEntry, Store};
+use crate::store::{DeviceLayout, Group, Preset, Room, Scene, SceneEntry, Store, UsageSample};
+use crate::usage;
 
 #[derive(RustEmbed)]
 #[folder = "web/"]
@@ -39,12 +40,14 @@ pub struct AppState {
     pub bind: String,
     pub poll_interval_secs: u64,
     pub discovery_broadcast: String,
+    pub usage_sample_interval_mins: u64,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
     // The UI is a single-origin app: scripts and styles only from this server, no
     // framing, no inline script. Styles set through the CSSOM from app.js are allowed
-    // under this policy; inline style attributes are not used.
+    // under this policy; inline style attributes are not used. The service worker and
+    // the web manifest fall under script-src / default-src 'self'.
     let csp = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; \
                connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
     Router::new()
@@ -66,6 +69,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/devices/{id}/raw", get(raw_device))
         .route("/api/devices/{id}/usage", get(device_usage))
         .route("/api/devices/{id}/reboot", post(reboot_device))
+        .route("/api/rooms", get(list_rooms).post(create_room))
+        .route("/api/rooms/{id}", put(update_room).delete(delete_room))
+        .route("/api/layout", get(get_layout).put(set_layout))
         .route("/api/groups", get(list_groups).post(create_group))
         .route("/api/groups/{id}", put(update_group).delete(delete_group))
         .route("/api/groups/{id}/state", post(set_group_state))
@@ -74,6 +80,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/scenes/capture", post(capture_scene))
         .route("/api/scenes/{id}", put(update_scene).delete(delete_scene))
         .route("/api/scenes/{id}/apply", post(apply_scene))
+        .route("/api/presets", get(list_presets).post(create_preset))
+        .route(
+            "/api/presets/{id}",
+            put(update_preset).delete(delete_preset),
+        )
+        .route("/api/usage", get(list_usage))
+        .route("/api/usage/latest", get(latest_usage))
+        .route("/api/usage/sample", post(sample_usage))
         .route("/api/events", get(events))
         .route("/{*path}", get(asset))
         .layer(SetResponseHeaderLayer::if_not_present(
@@ -173,6 +187,7 @@ struct ServerInfo {
     bind: String,
     poll_interval_secs: u64,
     discovery_broadcast: String,
+    usage_sample_interval_mins: u64,
     device_count: usize,
     debug_build: bool,
 }
@@ -188,6 +203,7 @@ async fn server_info(State(app): State<Arc<AppState>>) -> Json<ServerInfo> {
         bind: app.bind.clone(),
         poll_interval_secs: app.poll_interval_secs,
         discovery_broadcast: app.discovery_broadcast.clone(),
+        usage_sample_interval_mins: app.usage_sample_interval_mins,
         device_count: app.registry.snapshots().await.len(),
         debug_build: cfg!(debug_assertions),
     })
@@ -291,7 +307,10 @@ async fn create_device(
         .await
         .map_err(ApiError::store)?;
     match app.registry.add(device.clone()).await {
-        Ok(snapshot) => Ok((StatusCode::CREATED, Json(snapshot))),
+        Ok(snapshot) => {
+            app.registry.notify_changed("layout");
+            Ok((StatusCode::CREATED, Json(snapshot)))
+        }
         Err(err) => {
             let _ = app.store.delete_device(device.id).await;
             Err(err.into())
@@ -352,8 +371,9 @@ async fn delete_device(
         .map_err(ApiError::store)?;
     let in_registry = app.registry.remove(&id).await;
     if in_store || in_registry {
-        app.registry.notify_changed("groups");
-        app.registry.notify_changed("scenes");
+        for what in ["groups", "scenes", "layout"] {
+            app.registry.notify_changed(what);
+        }
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(CommandError::NotFound.into())
@@ -458,6 +478,120 @@ async fn reboot_device(
 ) -> Result<StatusCode, ApiError> {
     app.registry.reboot(&id).await?;
     Ok(StatusCode::ACCEPTED)
+}
+
+// ---------------------------------------------------------------- rooms and layout
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomBody {
+    name: String,
+    #[serde(default)]
+    position: Option<i64>,
+}
+
+async fn list_rooms(State(app): State<Arc<AppState>>) -> Result<Json<Vec<Room>>, ApiError> {
+    app.store
+        .list_rooms()
+        .await
+        .map(Json)
+        .map_err(ApiError::store)
+}
+
+async fn create_room(
+    State(app): State<Arc<AppState>>,
+    Json(body): Json<RoomBody>,
+) -> Result<(StatusCode, Json<Room>), ApiError> {
+    if !valid_name(&body.name) {
+        return Err(ApiError::bad_request("invalid room name"));
+    }
+    let room = app
+        .store
+        .save_room(Room {
+            id: 0,
+            name: body.name.trim().to_string(),
+            position: body.position.unwrap_or(0),
+        })
+        .await
+        .map_err(ApiError::store)?;
+    app.registry.notify_changed("layout");
+    Ok((StatusCode::CREATED, Json(room)))
+}
+
+async fn update_room(
+    State(app): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<RoomBody>,
+) -> Result<Json<Room>, ApiError> {
+    if !valid_name(&body.name) {
+        return Err(ApiError::bad_request("invalid room name"));
+    }
+    let current = app
+        .store
+        .list_rooms()
+        .await
+        .map_err(ApiError::store)?
+        .into_iter()
+        .find(|r| r.id == id)
+        .ok_or_else(|| ApiError::not_found("unknown room"))?;
+    let room = app
+        .store
+        .save_room(Room {
+            id,
+            name: body.name.trim().to_string(),
+            position: body.position.unwrap_or(current.position),
+        })
+        .await
+        .map_err(ApiError::store)?;
+    app.registry.notify_changed("layout");
+    Ok(Json(room))
+}
+
+async fn delete_room(
+    State(app): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    if app.store.delete_room(id).await.map_err(ApiError::store)? {
+        app.registry.notify_changed("layout");
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("unknown room"))
+    }
+}
+
+#[derive(Serialize)]
+struct Layout {
+    rooms: Vec<Room>,
+    devices: Vec<DeviceLayout>,
+}
+
+async fn get_layout(State(app): State<Arc<AppState>>) -> Result<Json<Layout>, ApiError> {
+    Ok(Json(Layout {
+        rooms: app.store.list_rooms().await.map_err(ApiError::store)?,
+        devices: app.store.list_layout().await.map_err(ApiError::store)?,
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayoutBody {
+    devices: Vec<DeviceLayout>,
+}
+
+/// Bulk update of room and position, used after reordering in the UI.
+async fn set_layout(
+    State(app): State<Arc<AppState>>,
+    Json(body): Json<LayoutBody>,
+) -> Result<StatusCode, ApiError> {
+    if body.devices.iter().any(|d| !valid_id(&d.id)) {
+        return Err(ApiError::bad_request("invalid device id"));
+    }
+    app.store
+        .set_layout(body.devices)
+        .await
+        .map_err(ApiError::store)?;
+    app.registry.notify_changed("layout");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------- groups
@@ -779,6 +913,136 @@ async fn apply_scene(
     }))
 }
 
+// ---------------------------------------------------------------- presets
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PresetBody {
+    name: String,
+    command: LightCommand,
+    #[serde(default)]
+    position: Option<i64>,
+}
+
+fn validate_preset(body: &PresetBody) -> Result<(), ApiError> {
+    if !valid_name(&body.name) {
+        return Err(ApiError::bad_request("invalid preset name"));
+    }
+    body.command.validate().map_err(ApiError::bad_request)
+}
+
+async fn list_presets(State(app): State<Arc<AppState>>) -> Result<Json<Vec<Preset>>, ApiError> {
+    app.store
+        .list_presets()
+        .await
+        .map(Json)
+        .map_err(ApiError::store)
+}
+
+async fn create_preset(
+    State(app): State<Arc<AppState>>,
+    Json(body): Json<PresetBody>,
+) -> Result<(StatusCode, Json<Preset>), ApiError> {
+    validate_preset(&body)?;
+    let preset = app
+        .store
+        .save_preset(Preset {
+            id: 0,
+            name: body.name.trim().to_string(),
+            command: body.command,
+            position: body.position.unwrap_or(0),
+        })
+        .await
+        .map_err(ApiError::store)?;
+    app.registry.notify_changed("presets");
+    Ok((StatusCode::CREATED, Json(preset)))
+}
+
+async fn update_preset(
+    State(app): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<PresetBody>,
+) -> Result<Json<Preset>, ApiError> {
+    validate_preset(&body)?;
+    let current = app
+        .store
+        .list_presets()
+        .await
+        .map_err(ApiError::store)?
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| ApiError::not_found("unknown preset"))?;
+    let preset = app
+        .store
+        .save_preset(Preset {
+            id,
+            name: body.name.trim().to_string(),
+            command: body.command,
+            position: body.position.unwrap_or(current.position),
+        })
+        .await
+        .map_err(ApiError::store)?;
+    app.registry.notify_changed("presets");
+    Ok(Json(preset))
+}
+
+async fn delete_preset(
+    State(app): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    if app.store.delete_preset(id).await.map_err(ApiError::store)? {
+        app.registry.notify_changed("presets");
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("unknown preset"))
+    }
+}
+
+// ---------------------------------------------------------------- usage
+
+#[derive(Deserialize)]
+struct UsageParams {
+    device: Option<String>,
+    /// Unix seconds; defaults to 30 days ago.
+    since: Option<i64>,
+}
+
+async fn list_usage(
+    State(app): State<Arc<AppState>>,
+    Query(params): Query<UsageParams>,
+) -> Result<Json<Vec<UsageSample>>, ApiError> {
+    if let Some(device) = &params.device
+        && !valid_id(device)
+    {
+        return Err(ApiError::bad_request("invalid device id"));
+    }
+    let since = params
+        .since
+        .unwrap_or_else(|| app.started_at as i64 - 30 * 24 * 3600);
+    app.store
+        .list_usage(params.device, since)
+        .await
+        .map(Json)
+        .map_err(ApiError::store)
+}
+
+async fn latest_usage(
+    State(app): State<Arc<AppState>>,
+) -> Result<Json<Vec<UsageSample>>, ApiError> {
+    app.store
+        .latest_usage()
+        .await
+        .map(Json)
+        .map_err(ApiError::store)
+}
+
+/// Reads the counters of every online device right now.
+async fn sample_usage(State(app): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let sampled = usage::sample_all(&app.registry, &app.store).await;
+    app.registry.notify_changed("usage");
+    Json(json!({ "sampled": sampled }))
+}
+
 // ---------------------------------------------------------------- events and assets
 
 /// Streams every device snapshot once on connect, then every change and log entry.
@@ -826,14 +1090,20 @@ async fn asset(Path(path): Path<String>) -> Response {
 
 fn serve_asset(path: &str) -> Response {
     match Assets::get(path) {
-        Some(file) => (
-            [
-                (header::CONTENT_TYPE, file.metadata.mimetype().to_string()),
-                (header::CACHE_CONTROL, "no-cache".to_string()),
-            ],
-            file.data.into_owned(),
-        )
-            .into_response(),
+        Some(file) => {
+            let mut mime = file.metadata.mimetype().to_string();
+            if path.ends_with(".webmanifest") {
+                mime = "application/manifest+json".to_string();
+            }
+            (
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (header::CACHE_CONTROL, "no-cache".to_string()),
+                ],
+                file.data.into_owned(),
+            )
+                .into_response()
+        }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }

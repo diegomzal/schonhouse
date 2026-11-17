@@ -10,9 +10,12 @@ poll_interval_secs = 10
 # Where the UDP discovery query is broadcast. The limited broadcast address works on
 # most networks; use your subnet broadcast (e.g. "192.168.0.255") if it does not.
 discovery_broadcast = "255.255.255.255"
+# Minutes between usage samples (time on, energy) for the Energy tab. 0 disables.
+usage_sample_interval_mins = 60
 
 [storage]
-# SQLite database holding devices, groups and scenes. Created on first start.
+# SQLite database holding devices, rooms, groups, scenes, presets and usage samples.
+# Created on first start; schema upgrades are applied automatically.
 path = "schonhouse.db"
 
 # Devices live in the database and are normally added from the UI (Add device -> Scan).

@@ -12,9 +12,13 @@ SQLite file. First supported devices: TP-Link Tapo L535 color bulbs.
 - Live web UI (Server-Sent Events): power, brightness, white temperature with presets,
   color with swatches, typed values, device details and diagnostics.
 - Groups (apply one command to several devices) and scenes (saved states, captured
-  from the current state with one click).
+  from the current state with one click, editable per device).
+- Rooms with manual ordering, and your own color/white presets.
+- Energy tab: time on and energy per device and in total, with a 30-day daily chart.
+- Installable as an app on phones (PWA) with an offline-capable shell.
 - LAN discovery: scan for Tapo devices and add them from the UI; no config editing.
-- Embedded SQLite storage for devices, groups and scenes.
+- Embedded SQLite storage for devices, rooms, groups, scenes, presets and usage
+  samples, with automatic schema upgrades.
 - Event log, server info and raw JSON views for debugging.
 - Small footprint: release profile with LTO, single static binary, no runtime.
 

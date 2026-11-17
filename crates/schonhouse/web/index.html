@@ -2,9 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0e1014">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Schonhouse">
   <title>Schonhouse</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -15,6 +22,7 @@
     </div>
     <nav class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="devices" class="active">Devices</button>
+      <button type="button" role="tab" data-tab="energy">Energy</button>
       <button type="button" role="tab" data-tab="system">System</button>
     </nav>
     <span id="connection" class="pill" title="Event stream status">connecting…</span>
@@ -26,7 +34,7 @@
         <h2>Scenes</h2>
         <div class="strip-actions">
           <button type="button" class="ghost" id="save-scene">Save current…</button>
-          <button type="button" class="ghost" id="manage-scenes" aria-pressed="false">Manage</button>
+          <button type="button" class="ghost" id="manage-scenes" aria-pressed="false">Edit</button>
         </div>
       </div>
       <div id="scenes" class="chips big"></div>
@@ -49,12 +57,36 @@
       <div class="strip-head">
         <h2>Devices</h2>
         <div class="strip-actions">
+          <button type="button" class="ghost" id="manage-rooms">Rooms…</button>
+          <button type="button" class="ghost" id="manage-presets">Presets…</button>
           <button type="button" class="ghost" id="add-device">Add device…</button>
         </div>
       </div>
-      <main id="devices" class="grid"></main>
+      <div id="rooms-container"></div>
       <p id="empty" class="muted" hidden>No devices yet. Use “Add device…” to discover the ones on your network.</p>
     </section>
+  </section>
+
+  <section id="tab-energy" class="tab">
+    <article class="card">
+      <header>
+        <h2>Usage</h2>
+        <div class="row">
+          <select id="usage-device" aria-label="Device"><option value="">All devices</option></select>
+          <button type="button" class="ghost" id="sample-usage">Sample now</button>
+        </div>
+      </header>
+      <p class="muted" id="usage-note">Counters reported by the devices: time on and energy for today, the last 7 and the last 30 days. Sampled every hour.</p>
+      <table class="usage" id="usage-table">
+        <thead><tr><th>Device</th><th>Today</th><th>7 days</th><th>30 days</th><th>Sampled</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p id="usage-empty" class="muted" hidden>No samples yet. Samples are taken shortly after start and then every hour, or press “Sample now”.</p>
+    </article>
+    <article class="card">
+      <header><h2>Energy per day</h2><span class="muted" id="chart-caption"></span></header>
+      <svg id="usage-chart" viewBox="0 0 640 220" preserveAspectRatio="none" role="img" aria-label="Daily energy chart"></svg>
+    </article>
   </section>
 
   <section id="tab-system" class="tab">
@@ -124,6 +156,83 @@
     </form>
   </dialog>
 
+  <!-- Rooms -->
+  <dialog id="dlg-rooms">
+    <form method="dialog" class="dialog">
+      <header><h2>Rooms</h2><button type="button" class="close" data-close aria-label="Close">×</button></header>
+      <section>
+        <ul id="rooms-list" class="found"></ul>
+        <p class="muted">Assign devices to rooms from each device's Details panel.</p>
+        <div class="row">
+          <input name="name" placeholder="New room name" maxlength="64" autocomplete="off">
+          <button type="submit" class="primary">Add</button>
+        </div>
+      </section>
+      <footer><button type="button" class="ghost" data-close>Close</button></footer>
+    </form>
+  </dialog>
+
+  <!-- Presets -->
+  <dialog id="dlg-presets">
+    <form method="dialog" class="dialog">
+      <header><h2>Presets</h2><button type="button" class="close" data-close aria-label="Close">×</button></header>
+      <section>
+        <ul id="presets-list" class="found"></ul>
+        <p class="muted">A preset is a color or white setting you can apply to any device or group. Create one from a device's current state.</p>
+        <div class="row">
+          <select name="device" aria-label="Device"></select>
+          <input name="name" placeholder="Preset name" maxlength="64" autocomplete="off">
+          <button type="submit" class="primary">Save current</button>
+        </div>
+      </section>
+      <footer><button type="button" class="ghost" data-close>Close</button></footer>
+    </form>
+  </dialog>
+
+  <!-- Scene editor -->
+  <dialog id="dlg-scene">
+    <form method="dialog" class="dialog wide">
+      <header><h2>Edit scene</h2><button type="button" class="close" data-close aria-label="Close">×</button></header>
+      <section>
+        <label class="field">Name <input name="name" required maxlength="64" autocomplete="off"></label>
+        <div id="scene-entries" class="entries"></div>
+        <div class="row">
+          <select name="add-device" aria-label="Add device"></select>
+          <button type="button" class="ghost" id="scene-add-device">Add to scene</button>
+        </div>
+      </section>
+      <footer>
+        <button type="button" class="ghost danger" id="scene-delete">Delete scene</button>
+        <span class="spacer"></span>
+        <button type="button" class="ghost" data-close>Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <template id="scene-entry">
+    <div class="entry">
+      <div class="entry-head">
+        <b class="dev-name"></b>
+        <button type="button" class="ghost danger small" data-action="remove">Remove</button>
+      </div>
+      <div class="entry-fields">
+        <label>Mode
+          <select name="mode">
+            <option value="off">Off</option>
+            <option value="on">On, keep color</option>
+            <option value="white">White</option>
+            <option value="color">Color</option>
+          </select>
+        </label>
+        <label>Brightness % <input type="number" name="brightness" min="1" max="100" step="1" inputmode="numeric"></label>
+        <label>White K <input type="number" name="color_temp" min="2500" max="6500" step="100" inputmode="numeric"></label>
+        <label>Hue ° <input type="number" name="hue" min="0" max="360" step="1" inputmode="numeric"></label>
+        <label>Saturation % <input type="number" name="saturation" min="1" max="100" step="1" inputmode="numeric"></label>
+      </div>
+    </div>
+  </template>
+
   <template id="card">
     <article class="card device">
       <header>
@@ -176,6 +285,10 @@
           <span class="unit">%</span>
           <div class="swatches"></div>
         </div>
+        <div class="control presets-row" hidden>
+          <label>Presets</label>
+          <div class="chips presets"></div>
+        </div>
       </div>
 
       <div class="error" hidden></div>
@@ -187,8 +300,14 @@
           <input class="rename-input" maxlength="64" placeholder="Custom name (empty = device name)" autocomplete="off">
           <button type="button" class="ghost" data-action="rename">Save name</button>
         </div>
+        <div class="layout-row">
+          <label>Room <select class="room-select"></select></label>
+          <button type="button" class="ghost" data-action="move-up" title="Move up">↑</button>
+          <button type="button" class="ghost" data-action="move-down" title="Move down">↓</button>
+        </div>
         <div class="actions">
           <button type="button" class="ghost" data-action="refresh">Refresh</button>
+          <button type="button" class="ghost" data-action="preset">Save as preset</button>
           <button type="button" class="ghost" data-action="usage">Usage</button>
           <button type="button" class="ghost" data-action="raw">Raw JSON</button>
           <button type="button" class="ghost danger" data-action="reboot">Reboot</button>
@@ -246,6 +365,10 @@
           <input type="number" name="saturation" min="1" max="100" step="1" value="100" inputmode="numeric">
           <span class="unit">%</span>
           <div class="swatches"></div>
+        </div>
+        <div class="control presets-row" hidden>
+          <label>Presets</label>
+          <div class="chips presets"></div>
         </div>
       </div>
       <p class="muted no-common" hidden>These devices have no controls in common.</p>

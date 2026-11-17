@@ -32,6 +32,9 @@ pub struct ServerConfig {
     /// Address the UDP discovery query is broadcast to.
     #[serde(default = "default_discovery_broadcast")]
     pub discovery_broadcast: String,
+    /// Minutes between usage (time on, energy) samples. 0 disables sampling.
+    #[serde(default = "default_usage_interval")]
+    pub usage_sample_interval_mins: u64,
 }
 
 impl Default for ServerConfig {
@@ -40,8 +43,13 @@ impl Default for ServerConfig {
             bind: default_bind(),
             poll_interval_secs: default_poll_interval(),
             discovery_broadcast: default_discovery_broadcast(),
+            usage_sample_interval_mins: default_usage_interval(),
         }
     }
+}
+
+fn default_usage_interval() -> u64 {
+    60
 }
 
 #[derive(Debug, Clone, Deserialize)]

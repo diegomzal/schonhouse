@@ -19,11 +19,12 @@ and no frontend build step.
 |------|----------------|
 | `src/main.rs` | CLI flags, logging, config loading, server start, graceful shutdown |
 | `src/config.rs` | `schonhouse.toml` schema and validation, `.env` loading, credentials |
-| `src/store.rs` | SQLite schema and queries: devices, groups, scenes (`rusqlite`, bundled) |
+| `src/store.rs` | SQLite schema and queries: devices, rooms, groups, scenes, presets, usage samples (`rusqlite`, bundled) |
+| `src/usage.rs` | Hourly sampling of the devices' usage counters into the store |
 | `src/devices.rs` | Device state types, the `Registry` (add/remove at runtime), one actor task per device |
 | `src/discovery.rs` | UDP broadcast discovery of Tapo devices on the LAN |
 | `src/api.rs` | REST routes, SSE stream, security headers, embedded static assets |
-| `web/` | Vanilla HTML/CSS/JS UI, embedded into the binary with `rust-embed` |
+| `web/` | Vanilla HTML/CSS/JS UI plus web manifest, service worker and icons, embedded with `rust-embed` |
 
 ## Runtime model
 
@@ -38,12 +39,18 @@ and no frontend build step.
   request senders, and a `broadcast` channel of events that feeds SSE clients. Devices
   are added and removed at runtime; removing one drops its channel, which ends the
   actor.
-- **Store.** One SQLite file in WAL mode with foreign keys on. Tables: `devices`,
-  `groups` + `group_members`, `scenes` + `scene_entries` (the entry command is stored as
-  JSON so other device kinds can reuse it). Queries run on Tokio's blocking pool;
-  writes are single transactions. `PRAGMA user_version` tracks the schema version for
-  future migrations. On startup, `[[devices]]` entries from the config are imported
-  when their id is not in the database.
+- **Store.** One SQLite file in WAL mode with foreign keys on. Tables: `devices`
+  (with `room_id` and `position` for the UI layout), `rooms`, `groups` +
+  `group_members`, `scenes` + `scene_entries`, `presets` (commands stored as JSON so
+  other device kinds can reuse them) and `usage_samples`. Queries run on Tokio's
+  blocking pool; writes are single transactions. `PRAGMA user_version` tracks the
+  schema version and `migrate` upgrades older files step by step (v1 → v2 added rooms,
+  layout, presets and usage). On startup, `[[devices]]` entries from the config are
+  imported when their id is not in the database.
+- **Usage sampling.** A background task reads each online device's counters (minutes
+  on and Wh for today / 7 days / 30 days) every `usage_sample_interval_mins` (first
+  run 90 s after start) and keeps 90 days of samples. The Energy tab derives a daily
+  series from the highest "today" reading per calendar day.
 - **Batch commands.** Groups, scenes and "all devices" fan out one command per device
   concurrently (`JoinSet`) and report every outcome, so one offline bulb does not block
   the others.
@@ -76,6 +83,12 @@ and no frontend build step.
 | `GET` | `/api/devices/{id}/raw` | Live, unfiltered device info JSON from the device |
 | `GET` | `/api/devices/{id}/usage` | Live usage counters (time on, energy) |
 | `POST` | `/api/devices/{id}/reboot` | Reboot the device (`202`) |
+| `GET` | `/api/rooms` | List rooms |
+| `POST` | `/api/rooms` | Create `{ name }` (`201`) |
+| `PUT` | `/api/rooms/{id}` | Rename / reorder `{ name, position? }` |
+| `DELETE` | `/api/rooms/{id}` | Delete; its devices become unassigned (`204`) |
+| `GET` | `/api/layout` | `{ rooms, devices: [{ id, room_id, position }] }` |
+| `PUT` | `/api/layout` | Bulk update `{ devices: [{ id, room_id, position }] }` (`204`) |
 | `GET` | `/api/groups` | List groups; each carries `capabilities`, the intersection of its members' |
 | `POST` | `/api/groups` | Create `{ name, devices: [ids] }` (`201`) |
 | `PUT` | `/api/groups/{id}` | Replace name and members |
@@ -88,7 +101,14 @@ and no frontend build step.
 | `PUT` | `/api/scenes/{id}` | Replace name and entries |
 | `DELETE` | `/api/scenes/{id}` | Delete (`204`) |
 | `POST` | `/api/scenes/{id}/apply` | Apply the scene (batch result) |
-| `GET` | `/api/events` | SSE: snapshots on connect, then `device`, `device-removed`, `changed`, `log` |
+| `GET` | `/api/presets` | List presets |
+| `POST` | `/api/presets` | Create `{ name, command }` (`201`) |
+| `PUT` | `/api/presets/{id}` | Update `{ name, command, position? }` |
+| `DELETE` | `/api/presets/{id}` | Delete (`204`) |
+| `GET` | `/api/usage?device=&since=` | Usage samples (default: last 30 days) |
+| `GET` | `/api/usage/latest` | Most recent sample per device |
+| `POST` | `/api/usage/sample` | Read every online device's counters now |
+| `GET` | `/api/events` | SSE: snapshots on connect, then `device`, `device-removed`, `changed` (`groups`, `scenes`, `layout`, `presets`, `usage`), `log` |
 
 The toggle endpoints exist for physical buttons: a single request with no body and no
 knowledge of the current state. Offline devices count as off when deciding the direction.
@@ -134,6 +154,7 @@ bind = "0.0.0.0:8080"
 poll_interval_secs = 10
 
 discovery_broadcast = "255.255.255.255"
+usage_sample_interval_mins = 60    # 0 disables usage sampling
 
 [storage]
 path = "schonhouse.db"
@@ -149,18 +170,28 @@ so the config file can be committed. Unknown keys are rejected to catch typos.
 
 ## Web UI
 
-`web/index.html`, `style.css` and `app.js`. The page loads `/api/devices`, `/api/info`
-and `/api/log` once, then listens to `/api/events`. Two tabs:
+`web/index.html`, `style.css` and `app.js`, plus `manifest.webmanifest`, `sw.js` and
+icons so the page installs as an app on phones (standalone window, home-screen icon,
+shell cached by the service worker; API calls are never cached). The page loads the
+devices, layout, groups, scenes, presets and server info once, then listens to
+`/api/events`. Three tabs:
 
 - **Devices**: a scenes bar (apply with one tap, "Save current…" captures the present
-  state, "Manage" to delete), group cards (the controls every member supports, from
-  on/off up to color swatches, applied to all members; edit/delete, "New group…"),
-  "All on/off", and one card per device with a
+  state, "Edit" turns the chips into an editor where each device's mode, brightness,
+  white temperature or color can be changed, devices added or removed, and the scene
+  deleted), group cards (the controls every member supports, from on/off up to color
+  swatches, applied to all members; edit/delete, "New group…"), "All on/off", and the
+  devices grouped by room ("Rooms…" manages rooms; each card's Details picks the room
+  and moves the card up or down). User presets ("Presets…", or "Save as preset" on a
+  device) appear as chips on every device and group card that supports them. Each
+  device card has a
   status dot, power button, and a slider plus a typed number input for each supported
   capability (brightness, white temperature with presets, hue, saturation with color
   swatches). A `Details` panel shows the data reported by the device (model, firmware,
   MAC, Wi-Fi signal, on-time, ...), a name override, and Refresh, Usage, Raw JSON,
   Reboot and Remove. "Add device…" opens a dialog that scans the LAN or takes an ip.
+- **Energy**: per-device and total time on and energy for today, 7 and 30 days, a
+  30-day daily energy chart (all devices or one), and "Sample now".
 - **System**: server info, event-stream status, the live event log, and the raw
   snapshot JSON.
 
@@ -179,5 +210,6 @@ once the first deployment is done.
 - Deployment on the Pi (unit file and guide exist, see `docs/deployment.md`); measure
   the footprint there.
 - Schedules and automations (time of day, sunset, timers) stored in SQLite.
+- Smooth transitions (fades, sunrise simulation).
 - More device kinds behind the same `DeviceKind` enum and `Capability` list (Tapo
   plugs, white-only bulbs).
