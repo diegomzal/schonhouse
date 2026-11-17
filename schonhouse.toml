@@ -1,0 +1,21 @@
+# Schonhouse configuration. Credentials are NOT stored here: set TAPO_USERNAME and
+# TAPO_PASSWORD in the environment or in a .env file next to the binary.
+
+[server]
+# Listen on every interface so the UI is reachable from the local network.
+bind = "0.0.0.0:8080"
+# Seconds between state polls for each device.
+poll_interval_secs = 10
+
+# Each device needs a stable `id` (used in URLs), a `kind` and an `ip`.
+# `name` is optional: without it, the name set in the Tapo app is shown.
+
+[[devices]]
+id = "light-1"
+kind = "tapo-l535"
+ip = "192.168.0.2"
+
+[[devices]]
+id = "light-2"
+kind = "tapo-l535"
+ip = "192.168.0.3"

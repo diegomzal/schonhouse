@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Schonhouse</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z" fill="currentColor"/></svg>
+      <h1>Schonhouse</h1>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="devices" class="active">Devices</button>
+      <button type="button" role="tab" data-tab="system">System</button>
+    </nav>
+    <span id="connection" class="pill" title="Event stream status">connecting…</span>
+  </header>
+
+  <section id="tab-devices" class="tab active">
+    <main id="devices" class="grid"></main>
+    <p id="empty" class="muted" hidden>No devices configured. Add some to <code>schonhouse.toml</code>.</p>
+  </section>
+
+  <section id="tab-system" class="tab">
+    <div class="grid two">
+      <article class="card">
+        <header><h2>Server</h2><button type="button" class="ghost" id="reload-info">Refresh</button></header>
+        <dl class="facts" id="server-info"></dl>
+      </article>
+      <article class="card">
+        <header><h2>Connection</h2></header>
+        <dl class="facts" id="conn-info"></dl>
+      </article>
+    </div>
+    <article class="card">
+      <header><h2>Event log</h2><button type="button" class="ghost" id="clear-log">Clear</button></header>
+      <ul id="log" class="log"></ul>
+    </article>
+    <article class="card">
+      <header><h2>Raw snapshots</h2><button type="button" class="ghost" id="reload-raw">Refresh</button></header>
+      <pre id="raw-all" class="output"></pre>
+    </article>
+  </section>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <template id="card">
+    <article class="card device">
+      <header>
+        <div class="title">
+          <span class="dot" title="Status"></span>
+          <div>
+            <h2 class="name"></h2>
+            <div class="meta muted"><span class="model"></span> · <span class="ip"></span></div>
+          </div>
+        </div>
+        <button class="power" type="button" aria-label="Toggle power" title="Toggle power">
+          <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+            <path d="M12 3v9" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" fill="none"/>
+            <path d="M7 6.3a7.5 7.5 0 1 0 10 0" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" fill="none"/>
+          </svg>
+        </button>
+      </header>
+      <div class="summary"></div>
+
+      <div class="controls">
+        <div class="control" data-cap="brightness">
+          <label>Brightness</label>
+          <input type="range" name="brightness" min="1" max="100" step="1">
+          <input type="number" name="brightness" min="1" max="100" step="1" inputmode="numeric">
+          <span class="unit">%</span>
+        </div>
+        <div class="control" data-cap="color-temperature">
+          <label>White</label>
+          <input type="range" name="color_temp" min="2500" max="6500" step="100" class="temp">
+          <input type="number" name="color_temp" min="2500" max="6500" step="100" inputmode="numeric">
+          <span class="unit">K</span>
+          <div class="chips" data-field="color_temp">
+            <button type="button" data-value="2500">Candle</button>
+            <button type="button" data-value="2700">Warm</button>
+            <button type="button" data-value="4000">Neutral</button>
+            <button type="button" data-value="5000">Daylight</button>
+            <button type="button" data-value="6500">Cool</button>
+          </div>
+        </div>
+        <div class="control" data-cap="color">
+          <label>Hue</label>
+          <input type="range" name="hue" min="0" max="360" step="1" class="hue">
+          <input type="number" name="hue" min="0" max="360" step="1" inputmode="numeric">
+          <span class="unit">°</span>
+        </div>
+        <div class="control" data-cap="color">
+          <label>Saturation</label>
+          <input type="range" name="saturation" min="1" max="100" step="1" class="sat">
+          <input type="number" name="saturation" min="1" max="100" step="1" inputmode="numeric">
+          <span class="unit">%</span>
+          <div class="swatches"></div>
+        </div>
+      </div>
+
+      <div class="error" hidden></div>
+
+      <details class="details">
+        <summary>Details</summary>
+        <dl class="facts"></dl>
+        <div class="actions">
+          <button type="button" class="ghost" data-action="refresh">Refresh</button>
+          <button type="button" class="ghost" data-action="usage">Usage</button>
+          <button type="button" class="ghost" data-action="raw">Raw JSON</button>
+          <button type="button" class="ghost danger" data-action="reboot">Reboot</button>
+        </div>
+        <pre class="output" hidden></pre>
+      </details>
+    </article>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>
